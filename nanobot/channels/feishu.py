@@ -246,7 +246,6 @@ class FeishuConfig(Base):
     verification_token: str = ""
     allow_from: list[str] = Field(default_factory=list)
     react_emoji: str = "THUMBSUP"
-    remove_reaction_on_reply: bool = True  # Remove reaction when bot replies
     group_policy: Literal["open", "mention"] = "mention"
     reply_to_message: bool = False  # If True, bot replies quote the user's original message
 
@@ -279,7 +278,6 @@ class FeishuChannel(BaseChannel):
         self._ws_client: Any = None
         self._ws_thread: threading.Thread | None = None
         self._processed_message_ids: OrderedDict[str, None] = OrderedDict()  # Ordered dedup cache
-        self._pending_reactions: dict[str, str] = {}  # chat_id -> message_id for reaction removal
         self._loop: asyncio.AbstractEventLoop | None = None
 
     @staticmethod
@@ -432,37 +430,6 @@ class FeishuChannel(BaseChannel):
 
         loop = asyncio.get_running_loop()
         await loop.run_in_executor(None, self._add_reaction_sync, message_id, emoji_type)
-
-    def _remove_reaction_sync(self, message_id: str, emoji_type: str) -> None:
-        """Sync helper for removing reaction (runs in thread pool)."""
-        from lark_oapi.api.im.v1 import DeleteMessageReactionRequest, DeleteMessageReactionRequestBody, Emoji
-        try:
-            request = DeleteMessageReactionRequest.builder() \
-                .message_id(message_id) \
-                .request_body(
-                    DeleteMessageReactionRequestBody.builder()
-                    .reaction_type(Emoji.builder().emoji_type(emoji_type).build())
-                    .build()
-                ).build()
-
-            response = self._client.im.v1.message_reaction.delete(request)
-
-            if not response.success():
-                logger.warning("Failed to remove reaction: code={}, msg={}", response.code, response.msg)
-            else:
-                logger.debug("Removed {} reaction from message {}", emoji_type, message_id)
-        except Exception as e:
-            logger.warning("Error removing reaction: {}", e)
-
-    async def _remove_reaction(self, message_id: str, emoji_type: str = "THUMBSUP") -> None:
-        """
-        Remove a reaction emoji from a message (non-blocking).
-        """
-        if not self._client:
-            return
-
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(None, self._remove_reaction_sync, message_id, emoji_type)
 
     # Regex to match markdown tables (header + separator + data rows)
     _TABLE_RE = re.compile(
@@ -972,15 +939,6 @@ class FeishuChannel(BaseChannel):
             return
 
         try:
-            # Remove reaction on first reply (non-progress messages)
-            if (
-                self.config.remove_reaction_on_reply
-                and not msg.metadata.get("_progress", False)
-                and not msg.metadata.get("_stream_delta", False)
-                and msg.chat_id in self._pending_reactions
-            ):
-                reaction_msg_id = self._pending_reactions.pop(msg.chat_id)
-                await self._remove_reaction(reaction_msg_id, self.config.react_emoji)
             receive_id_type = "chat_id" if msg.chat_id.startswith("oc_") else "open_id"
             loop = asyncio.get_running_loop()
 
@@ -1116,10 +1074,6 @@ class FeishuChannel(BaseChannel):
             # Add reaction
             await self._add_reaction(message_id, self.config.react_emoji)
 
-            # Store message_id for later reaction removal
-            reply_to = chat_id if chat_type == "group" else sender_id
-            self._pending_reactions[reply_to] = message_id
-
             # Parse content
             content_parts = []
             media_paths = []
@@ -1187,7 +1141,8 @@ class FeishuChannel(BaseChannel):
             if not content and not media_paths:
                 return
 
-            # Forward to message bus (reply_to already set above)
+            # Forward to message bus
+            reply_to = chat_id if chat_type == "group" else sender_id
             await self._handle_message(
                 sender_id=sender_id,
                 chat_id=reply_to,

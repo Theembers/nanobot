@@ -64,14 +64,15 @@ class TestSessionLastConsolidated:
         session = Session(key="test:initial")
         assert session.last_consolidated == 0
 
-    def test_last_consolidated_persistence(self, tmp_path) -> None:
+    @pytest.mark.asyncio
+    async def test_last_consolidated_persistence(self, tmp_path) -> None:
         """Test that last_consolidated persists across save/load."""
         manager = SessionManager(Path(tmp_path))
         session1 = create_session_with_messages("test:persist", 20)
         session1.last_consolidated = 15
         manager.save(session1)
 
-        session2 = manager.get_or_create("test:persist")
+        session2 = await manager.get_or_create("test:persist")
         assert session2.last_consolidated == 15
         assert len(session2.messages) == 20
 
@@ -148,22 +149,24 @@ class TestSessionPersistence:
     def temp_manager(self, tmp_path):
         return SessionManager(Path(tmp_path))
 
-    def test_persistence_roundtrip(self, temp_manager):
+    @pytest.mark.asyncio
+    async def test_persistence_roundtrip(self, temp_manager):
         """Test that messages persist across save/load."""
         session1 = create_session_with_messages("test:persistence", 20)
         temp_manager.save(session1)
 
-        session2 = temp_manager.get_or_create("test:persistence")
+        session2 = await temp_manager.get_or_create("test:persistence")
         assert len(session2.messages) == 20
         assert session2.messages[0]["content"] == "msg0"
         assert session2.messages[-1]["content"] == "msg19"
 
-    def test_get_history_after_reload(self, temp_manager):
+    @pytest.mark.asyncio
+    async def test_get_history_after_reload(self, temp_manager):
         """Test that get_history works correctly after reload."""
         session1 = create_session_with_messages("test:reload", 30)
         temp_manager.save(session1)
 
-        session2 = temp_manager.get_or_create("test:reload")
+        session2 = await temp_manager.get_or_create("test:reload")
         history = session2.get_history(max_messages=10)
         assert len(history) == 10
         assert history[0]["content"] == "msg20"
@@ -510,7 +513,7 @@ class TestNewCommandArchival:
         from nanobot.bus.events import InboundMessage
 
         loop = self._make_loop(tmp_path)
-        session = loop.sessions.get_or_create("cli:test")
+        session = await loop.sessions.get_or_create("cli:test")
         for i in range(5):
             session.add_message("user", f"msg{i}")
             session.add_message("assistant", f"resp{i}")
@@ -531,7 +534,7 @@ class TestNewCommandArchival:
         assert response is not None
         assert "new session started" in response.content.lower()
 
-        session_after = loop.sessions.get_or_create("cli:test")
+        session_after = await loop.sessions.get_or_create("cli:test")
         assert len(session_after.messages) == 0
 
         await loop.close_mcp()
@@ -542,7 +545,7 @@ class TestNewCommandArchival:
         from nanobot.bus.events import InboundMessage
 
         loop = self._make_loop(tmp_path)
-        session = loop.sessions.get_or_create("cli:test")
+        session = await loop.sessions.get_or_create("cli:test")
         for i in range(15):
             session.add_message("user", f"msg{i}")
             session.add_message("assistant", f"resp{i}")
@@ -572,7 +575,7 @@ class TestNewCommandArchival:
         from nanobot.bus.events import InboundMessage
 
         loop = self._make_loop(tmp_path)
-        session = loop.sessions.get_or_create("cli:test")
+        session = await loop.sessions.get_or_create("cli:test")
         for i in range(3):
             session.add_message("user", f"msg{i}")
             session.add_message("assistant", f"resp{i}")
@@ -588,7 +591,7 @@ class TestNewCommandArchival:
 
         assert response is not None
         assert "new session started" in response.content.lower()
-        assert loop.sessions.get_or_create("cli:test").messages == []
+        assert (await loop.sessions.get_or_create("cli:test")).messages == []
 
     @pytest.mark.asyncio
     async def test_close_mcp_drains_background_tasks(self, tmp_path: Path) -> None:
@@ -596,7 +599,7 @@ class TestNewCommandArchival:
         from nanobot.bus.events import InboundMessage
 
         loop = self._make_loop(tmp_path)
-        session = loop.sessions.get_or_create("cli:test")
+        session = await loop.sessions.get_or_create("cli:test")
         for i in range(3):
             session.add_message("user", f"msg{i}")
             session.add_message("assistant", f"resp{i}")

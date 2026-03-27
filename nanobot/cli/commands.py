@@ -510,6 +510,7 @@ def gateway(
     from nanobot.cron.service import CronService
     from nanobot.cron.types import CronJob
     from nanobot.heartbeat.service import HeartbeatService
+    from nanobot.hooks import HookRegistry, discover_entry_points, discover_workspace_hooks
     from nanobot.session.manager import SessionManager
 
     if verbose:
@@ -524,6 +525,14 @@ def gateway(
     bus = MessageBus()
     provider = _make_provider(config)
     session_manager = SessionManager(config.workspace_path)
+
+    # Initialize hook registry and discover hooks
+    hook_registry = HookRegistry()
+    discover_entry_points(hook_registry)
+    discover_workspace_hooks(hook_registry, str(config.workspace_path))
+
+    # Inject hooks into session manager
+    session_manager.hooks = hook_registry
 
     # Preserve existing single-workspace installs, but keep custom workspaces clean.
     if is_default_workspace(config.workspace_path):
@@ -550,7 +559,12 @@ def gateway(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         timezone=config.agents.defaults.timezone,
+        hooks=hook_registry,
     )
+
+    # Inject hooks into internal components
+    agent.memory_consolidator.hooks = hook_registry
+    agent.commands.hooks = hook_registry
 
     # Set cron callback (needs agent)
     async def on_cron_job(job: CronJob) -> str | None:
@@ -602,6 +616,7 @@ def gateway(
 
     # Create channel manager
     channels = ChannelManager(config, bus)
+    channels.hooks = hook_registry
 
     def _pick_heartbeat_target() -> tuple[str, str]:
         """Pick a routable channel/chat target for heartbeat-triggered messages."""
@@ -637,7 +652,7 @@ def gateway(
 
         # Keep a small tail of heartbeat history so the loop stays bounded
         # without losing all short-term context between runs.
-        session = agent.sessions.get_or_create("heartbeat")
+        session = await agent.sessions.get_or_create("heartbeat")
         session.retain_recent_legal_suffix(hb_cfg.keep_recent_messages)
         agent.sessions.save(session)
 
@@ -720,12 +735,18 @@ def agent(
     from nanobot.agent.loop import AgentLoop
     from nanobot.bus.queue import MessageBus
     from nanobot.cron.service import CronService
+    from nanobot.hooks import HookRegistry, discover_entry_points, discover_workspace_hooks
 
     config = _load_runtime_config(config, workspace)
     sync_workspace_templates(config.workspace_path)
 
     bus = MessageBus()
     provider = _make_provider(config)
+
+    # Initialize hook registry and discover hooks
+    hook_registry = HookRegistry()
+    discover_entry_points(hook_registry)
+    discover_workspace_hooks(hook_registry, str(config.workspace_path))
 
     # Preserve existing single-workspace installs, but keep custom workspaces clean.
     if is_default_workspace(config.workspace_path):
@@ -755,7 +776,14 @@ def agent(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         timezone=config.agents.defaults.timezone,
+        hooks=hook_registry,
     )
+
+    # Inject hooks into internal components
+    agent_loop.memory_consolidator.hooks = hook_registry
+    agent_loop.commands.hooks = hook_registry
+    if agent_loop.sessions:
+        agent_loop.sessions.hooks = hook_registry
 
     # Shared reference for progress callbacks
     _thinking: ThinkingSpinner | None = None

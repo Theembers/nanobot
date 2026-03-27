@@ -11,6 +11,7 @@ from nanobot.bus.events import OutboundMessage
 from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 from nanobot.config.schema import Config
+from nanobot.hooks import HookContext, HookEvent, HookRegistry
 
 # Retry delays for message sending (exponential backoff: 1s, 2s, 4s)
 _SEND_RETRY_DELAYS = (1, 2, 4)
@@ -31,6 +32,7 @@ class ChannelManager:
         self.bus = bus
         self.channels: dict[str, BaseChannel] = {}
         self._dispatch_task: asyncio.Task | None = None
+        self.hooks: HookRegistry | None = None
 
         self._init_channels()
 
@@ -133,6 +135,22 @@ class ChannelManager:
 
                 channel = self.channels.get(msg.channel)
                 if channel:
+                    # Hook: before outbound send
+                    if self.hooks:
+                        hook_ctx = await self.hooks.call(
+                            HookEvent.BEFORE_OUTBOUND_SEND,
+                            HookContext(
+                                event=HookEvent.BEFORE_OUTBOUND_SEND,
+                                channel=msg.channel,
+                                data={
+                                    "chat_id": msg.chat_id,
+                                    "content": msg.content,
+                                    "metadata": msg.metadata,
+                                },
+                            ),
+                        )
+                        if hook_ctx.data.get("block"):
+                            continue  # 跳过此消息发送
                     await self._send_with_retry(channel, msg)
                 else:
                     logger.warning("Unknown channel: {}", msg.channel)

@@ -10,6 +10,7 @@ from typing import Any
 from loguru import logger
 
 from nanobot.config.paths import get_legacy_sessions_dir
+from nanobot.hooks import HookContext, HookEvent, HookRegistry
 from nanobot.utils.helpers import ensure_dir, safe_filename
 
 
@@ -137,6 +138,7 @@ class SessionManager:
         self.sessions_dir = ensure_dir(self.workspace / "sessions")
         self.legacy_sessions_dir = get_legacy_sessions_dir()
         self._cache: dict[str, Session] = {}
+        self.hooks: HookRegistry | None = None
 
     def _get_session_path(self, key: str) -> Path:
         """Get the file path for a session."""
@@ -148,7 +150,7 @@ class SessionManager:
         safe_key = safe_filename(key.replace(":", "_"))
         return self.legacy_sessions_dir / f"{safe_key}.jsonl"
 
-    def get_or_create(self, key: str) -> Session:
+    async def get_or_create(self, key: str) -> Session:
         """
         Get an existing session or create a new one.
 
@@ -162,10 +164,23 @@ class SessionManager:
             return self._cache[key]
 
         session = self._load(key)
-        if session is None:
+        is_new = session is None
+        if is_new:
             session = Session(key=key)
 
         self._cache[key] = session
+
+        # Hook: session created
+        if is_new and self.hooks:
+            await self.hooks.call(
+                HookEvent.SESSION_CREATED,
+                HookContext(
+                    event=HookEvent.SESSION_CREATED,
+                    session_key=session.key,
+                    data={"created_at": str(session.created_at)},
+                ),
+            )
+
         return session
 
     def _load(self, key: str) -> Session | None:

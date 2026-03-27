@@ -24,8 +24,12 @@ def _make_loop():
     workspace.__truediv__ = MagicMock(return_value=MagicMock())
 
     with patch("nanobot.agent.loop.ContextBuilder"), \
-         patch("nanobot.agent.loop.SessionManager"), \
+         patch("nanobot.agent.loop.SessionManager") as mock_session_manager, \
          patch("nanobot.agent.loop.SubagentManager"):
+        # Make get_or_create an async mock
+        mock_session = MagicMock()
+        mock_session.get_history.return_value = []
+        mock_session_manager.return_value.get_or_create = AsyncMock(return_value=mock_session)
         loop = AgentLoop(bus=bus, provider=provider, workspace=workspace)
     return loop, bus
 
@@ -124,7 +128,7 @@ class TestRestartCommand:
         loop, _bus = _make_loop()
         session = MagicMock()
         session.get_history.return_value = [{"role": "user"}] * 3
-        loop.sessions.get_or_create.return_value = session
+        loop.sessions.get_or_create = AsyncMock(return_value=session)
         loop._start_time = time.time() - 125
         loop._last_usage = {"prompt_tokens": 0, "completion_tokens": 0}
         loop.memory_consolidator.estimate_session_prompt_tokens = MagicMock(
@@ -162,7 +166,7 @@ class TestRestartCommand:
         loop, _bus = _make_loop()
         session = MagicMock()
         session.get_history.return_value = [{"role": "user"}]
-        loop.sessions.get_or_create.return_value = session
+        loop.sessions.get_or_create = AsyncMock(return_value=session)
         loop._last_usage = {"prompt_tokens": 1200, "completion_tokens": 34}
         loop.memory_consolidator.estimate_session_prompt_tokens = MagicMock(
             return_value=(0, "none")
@@ -181,7 +185,7 @@ class TestRestartCommand:
         loop, _bus = _make_loop()
         session = MagicMock()
         session.get_history.return_value = []
-        loop.sessions.get_or_create.return_value = session
+        loop.sessions.get_or_create = AsyncMock(return_value=session)
         loop.subagents.get_running_count.return_value = 0
 
         response = await loop.process_direct("/status", session_key="cli:test")

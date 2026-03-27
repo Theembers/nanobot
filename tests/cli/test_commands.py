@@ -439,7 +439,9 @@ def test_agent_config_sets_active_path(monkeypatch, tmp_path: Path) -> None:
 
     class _FakeAgentLoop:
         def __init__(self, *args, **kwargs) -> None:
-            pass
+            self.memory_consolidator = type('_FakeComponent', (), {})()
+            self.commands = type('_FakeComponent', (), {})()
+            self.sessions = None
 
         async def process_direct(self, *_args, **_kwargs):
             return OutboundMessage(channel="cli", chat_id="direct", content="ok")
@@ -477,7 +479,9 @@ def test_agent_uses_workspace_directory_for_cron_store(monkeypatch, tmp_path: Pa
 
     class _FakeAgentLoop:
         def __init__(self, *args, **kwargs) -> None:
-            pass
+            self.memory_consolidator = type('_FakeComponent', (), {})()
+            self.commands = type('_FakeComponent', (), {})()
+            self.sessions = None
 
         async def process_direct(self, *_args, **_kwargs):
             return OutboundMessage(channel="cli", chat_id="direct", content="ok")
@@ -524,7 +528,9 @@ def test_agent_workspace_override_does_not_migrate_legacy_cron(
 
     class _FakeAgentLoop:
         def __init__(self, *args, **kwargs) -> None:
-            pass
+            self.memory_consolidator = type('_FakeComponent', (), {})()
+            self.commands = type('_FakeComponent', (), {})()
+            self.sessions = None
 
         async def process_direct(self, *_args, **_kwargs):
             return OutboundMessage(channel="cli", chat_id="direct", content="ok")
@@ -577,7 +583,9 @@ def test_agent_custom_config_workspace_does_not_migrate_legacy_cron(
 
     class _FakeAgentLoop:
         def __init__(self, *args, **kwargs) -> None:
-            pass
+            self.memory_consolidator = type('_FakeComponent', (), {})()
+            self.commands = type('_FakeComponent', (), {})()
+            self.sessions = None
 
         async def process_direct(self, *_args, **_kwargs):
             return OutboundMessage(channel="cli", chat_id="direct", content="ok")
@@ -717,7 +725,7 @@ def test_gateway_uses_workspace_directory_for_cron_store(monkeypatch, tmp_path: 
     monkeypatch.setattr("nanobot.cli.commands.sync_workspace_templates", lambda _path: None)
     monkeypatch.setattr("nanobot.cli.commands._make_provider", lambda _config: object())
     monkeypatch.setattr("nanobot.bus.queue.MessageBus", lambda: object())
-    monkeypatch.setattr("nanobot.session.manager.SessionManager", lambda _workspace: object())
+    monkeypatch.setattr("nanobot.session.manager.SessionManager", lambda _workspace: type('_FakeSessionManager', (), {})())
 
     class _StopCron:
         def __init__(self, store_path: Path) -> None:
@@ -753,7 +761,7 @@ def test_gateway_workspace_override_does_not_migrate_legacy_cron(
     monkeypatch.setattr("nanobot.cli.commands.sync_workspace_templates", lambda _path: None)
     monkeypatch.setattr("nanobot.cli.commands._make_provider", lambda _config: object())
     monkeypatch.setattr("nanobot.bus.queue.MessageBus", lambda: object())
-    monkeypatch.setattr("nanobot.session.manager.SessionManager", lambda _workspace: object())
+    monkeypatch.setattr("nanobot.session.manager.SessionManager", lambda _workspace: type('_FakeSessionManager', (), {})())
     monkeypatch.setattr("nanobot.config.paths.get_cron_dir", lambda: legacy_dir)
 
     class _StopCron:
@@ -796,7 +804,7 @@ def test_gateway_custom_config_workspace_does_not_migrate_legacy_cron(
     monkeypatch.setattr("nanobot.cli.commands.sync_workspace_templates", lambda _path: None)
     monkeypatch.setattr("nanobot.cli.commands._make_provider", lambda _config: object())
     monkeypatch.setattr("nanobot.bus.queue.MessageBus", lambda: object())
-    monkeypatch.setattr("nanobot.session.manager.SessionManager", lambda _workspace: object())
+    monkeypatch.setattr("nanobot.session.manager.SessionManager", lambda _workspace: type('_FakeSessionManager', (), {})())
     monkeypatch.setattr("nanobot.config.paths.get_cron_dir", lambda: legacy_dir)
 
     class _StopCron:

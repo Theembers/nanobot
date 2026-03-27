@@ -27,6 +27,7 @@ from nanobot.agent.tools.web import WebFetchTool, WebSearchTool
 from nanobot.bus.events import InboundMessage, OutboundMessage
 from nanobot.command import CommandContext, CommandRouter, register_builtin_commands
 from nanobot.bus.queue import MessageBus
+from nanobot.hooks import HookRegistry, HookEvent, HookContext
 from nanobot.providers.base import LLMProvider
 from nanobot.session.manager import Session, SessionManager
 
@@ -66,6 +67,7 @@ class AgentLoop:
         mcp_servers: dict | None = None,
         channels_config: ChannelsConfig | None = None,
         timezone: str | None = None,
+        hooks: HookRegistry | None = None,
     ):
         from nanobot.config.schema import ExecToolConfig, WebSearchConfig
 
@@ -83,6 +85,7 @@ class AgentLoop:
         self.restrict_to_workspace = restrict_to_workspace
         self._start_time = time.time()
         self._last_usage: dict[str, int] = {}
+        self.hooks = hooks
 
         self.context = ContextBuilder(workspace, timezone=timezone)
         self.sessions = session_manager or SessionManager(workspace)
@@ -124,6 +127,13 @@ class AgentLoop:
         self._register_default_tools()
         self.commands = CommandRouter()
         register_builtin_commands(self.commands)
+
+    async def _call_hook(self, event: str, session_key: str = "", channel: str = "", **data) -> HookContext:
+        """调用 hook，如果 registry 为 None 则返回空 context"""
+        ctx = HookContext(event=event, session_key=session_key, channel=channel, data=data)
+        if self.hooks:
+            return await self.hooks.call(event, ctx)
+        return ctx
 
     def _register_default_tools(self) -> None:
         """Register the default set of tools."""
@@ -206,6 +216,7 @@ class AgentLoop:
         channel: str = "cli",
         chat_id: str = "direct",
         message_id: str | None = None,
+        session_key: str = "",
     ) -> tuple[str | None, list[str], list[dict]]:
         """Run the agent iteration loop.
 
@@ -239,6 +250,18 @@ class AgentLoop:
 
             tool_defs = self.tools.get_definitions()
 
+            # Hook: BEFORE_LLM_CALL
+            hook_ctx = await self._call_hook(
+                HookEvent.BEFORE_LLM_CALL,
+                session_key=session_key,
+                channel=channel,
+                messages=messages,
+                tools=tool_defs,
+                model=self.model,
+            )
+            if hook_ctx.data.get("messages"):
+                messages = hook_ctx.data["messages"]
+
             if on_stream:
                 response = await self.provider.chat_stream_with_retry(
                     messages=messages,
@@ -252,6 +275,15 @@ class AgentLoop:
                     tools=tool_defs,
                     model=self.model,
                 )
+
+            # Hook: AFTER_LLM_RESPONSE
+            await self._call_hook(
+                HookEvent.AFTER_LLM_RESPONSE,
+                session_key=session_key,
+                channel=channel,
+                response_content=response.content,
+                tool_calls_count=len(response.tool_calls or []),
+            )
 
             usage = response.usage or {}
             self._last_usage = {
@@ -296,16 +328,45 @@ class AgentLoop:
                 # independent calls in a single response on purpose.
                 # return_exceptions=True ensures all results are collected
                 # even if one tool is cancelled or raises BaseException.
+                # Hook: BEFORE_TOOL_EXECUTION - check for blocked tools
+                tool_calls_to_execute = []
+                blocked_results = {}  # tool_call_id -> error message
+                for tc in response.tool_calls:
+                    hook_ctx = await self._call_hook(
+                        HookEvent.BEFORE_TOOL_EXECUTION,
+                        session_key=session_key,
+                        channel=channel,
+                        tool_name=tc.name,
+                        arguments=tc.arguments,
+                    )
+                    if hook_ctx.data.get("block"):
+                        blocked_results[tc.id] = f"Tool '{tc.name}' execution was blocked by hook."
+                    else:
+                        tool_calls_to_execute.append(tc)
+
                 results = await asyncio.gather(*(
                     self.tools.execute(tc.name, tc.arguments)
-                    for tc in response.tool_calls
+                    for tc in tool_calls_to_execute
                 ), return_exceptions=True)
 
-                for tool_call, result in zip(response.tool_calls, results):
+                # Map results back to tool calls
+                result_map = {tc.id: result for tc, result in zip(tool_calls_to_execute, results)}
+                result_map.update(blocked_results)
+
+                for tc in response.tool_calls:
+                    result = result_map.get(tc.id)
                     if isinstance(result, BaseException):
                         result = f"Error: {type(result).__name__}: {result}"
                     messages = self.context.add_tool_result(
-                        messages, tool_call.id, tool_call.name, result
+                        messages, tc.id, tc.name, result
+                    )
+                    # Hook: AFTER_TOOL_EXECUTION
+                    await self._call_hook(
+                        HookEvent.AFTER_TOOL_EXECUTION,
+                        session_key=session_key,
+                        channel=channel,
+                        tool_name=tc.name,
+                        result=str(result)[:500],
                     )
             else:
                 if on_stream and on_stream_end:
@@ -367,6 +428,15 @@ class AgentLoop:
 
     async def _dispatch(self, msg: InboundMessage) -> None:
         """Process a message: per-session serial, cross-session concurrent."""
+        # Hook: BEFORE_MESSAGE_DISPATCH
+        ctx = await self._call_hook(
+            HookEvent.BEFORE_MESSAGE_DISPATCH,
+            session_key=msg.session_key,
+            channel=msg.channel,
+            content=msg.content,
+            sender_id=msg.sender_id,
+        )
+
         lock = self._session_locks.setdefault(msg.session_key, asyncio.Lock())
         gate = self._concurrency_gate or nullcontext()
         async with lock, gate:
@@ -408,6 +478,13 @@ class AgentLoop:
                 )
                 if response is not None:
                     await self.bus.publish_outbound(response)
+                    # Hook: AFTER_MESSAGE_DISPATCH
+                    await self._call_hook(
+                        HookEvent.AFTER_MESSAGE_DISPATCH,
+                        session_key=msg.session_key,
+                        channel=msg.channel,
+                        reply=response.content,
+                    )
                 elif msg.channel == "cli":
                     await self.bus.publish_outbound(OutboundMessage(
                         channel=msg.channel, chat_id=msg.chat_id,
@@ -461,7 +538,7 @@ class AgentLoop:
                                 else ("cli", msg.chat_id))
             logger.info("Processing system message from {}", msg.sender_id)
             key = f"{channel}:{chat_id}"
-            session = self.sessions.get_or_create(key)
+            session = await self.sessions.get_or_create(key)
             await self.memory_consolidator.maybe_consolidate_by_tokens(session)
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
             history = session.get_history(max_messages=0)
@@ -474,6 +551,7 @@ class AgentLoop:
             final_content, _, all_msgs = await self._run_agent_loop(
                 messages, channel=channel, chat_id=chat_id,
                 message_id=msg.metadata.get("message_id"),
+                session_key=key,
             )
             self._save_turn(session, all_msgs, 1 + len(history))
             self.sessions.save(session)
@@ -485,7 +563,7 @@ class AgentLoop:
         logger.info("Processing message from {}:{}: {}", msg.channel, msg.sender_id, preview)
 
         key = session_key or msg.session_key
-        session = self.sessions.get_or_create(key)
+        session = await self.sessions.get_or_create(key)
 
         # Slash commands
         raw = msg.content.strip()
@@ -508,6 +586,13 @@ class AgentLoop:
             channel=msg.channel, chat_id=msg.chat_id,
         )
 
+        # Hook: AGENT_BOOTSTRAP
+        await self._call_hook(
+            HookEvent.AGENT_BOOTSTRAP,
+            session_key=key,
+            channel=msg.channel,
+        )
+
         async def _bus_progress(content: str, *, tool_hint: bool = False) -> None:
             meta = dict(msg.metadata or {})
             meta["_progress"] = True
@@ -523,6 +608,7 @@ class AgentLoop:
             on_stream_end=on_stream_end,
             channel=msg.channel, chat_id=msg.chat_id,
             message_id=msg.metadata.get("message_id"),
+            session_key=key,
         )
 
         if final_content is None:

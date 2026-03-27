@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
+from nanobot.hooks import HookContext, HookEvent, HookRegistry
+
 if TYPE_CHECKING:
     from nanobot.bus.events import InboundMessage, OutboundMessage
     from nanobot.session.manager import Session
@@ -40,6 +42,7 @@ class CommandRouter:
         self._exact: dict[str, Handler] = {}
         self._prefix: list[tuple[str, Handler]] = []
         self._interceptors: list[Handler] = []
+        self.hooks: HookRegistry | None = None
 
     def priority(self, cmd: str, handler: Handler) -> None:
         self._priority[cmd] = handler
@@ -69,16 +72,42 @@ class CommandRouter:
         cmd = ctx.raw.lower()
 
         if handler := self._exact.get(cmd):
-            return await handler(ctx)
+            result = await handler(ctx)
+            if result is not None and self.hooks:
+                await self.hooks.call(
+                    HookEvent.COMMAND_EXECUTED,
+                    HookContext(
+                        event=HookEvent.COMMAND_EXECUTED,
+                        data={"command": cmd, "result": "handled"},
+                    ),
+                )
+            return result
 
         for pfx, handler in self._prefix:
             if cmd.startswith(pfx):
                 ctx.args = ctx.raw[len(pfx):]
-                return await handler(ctx)
+                result = await handler(ctx)
+                if result is not None and self.hooks:
+                    await self.hooks.call(
+                        HookEvent.COMMAND_EXECUTED,
+                        HookContext(
+                            event=HookEvent.COMMAND_EXECUTED,
+                            data={"command": cmd, "result": "handled"},
+                        ),
+                    )
+                return result
 
         for interceptor in self._interceptors:
             result = await interceptor(ctx)
             if result is not None:
+                if self.hooks:
+                    await self.hooks.call(
+                        HookEvent.COMMAND_EXECUTED,
+                        HookContext(
+                            event=HookEvent.COMMAND_EXECUTED,
+                            data={"command": cmd, "result": "handled"},
+                        ),
+                    )
                 return result
 
         return None

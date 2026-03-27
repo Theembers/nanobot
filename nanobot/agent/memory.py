@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Callable
 
 from loguru import logger
 
+from nanobot.hooks import HookContext, HookEvent, HookRegistry
 from nanobot.utils.helpers import ensure_dir, estimate_message_tokens, estimate_prompt_tokens_chain
 
 if TYPE_CHECKING:
@@ -246,6 +247,7 @@ class MemoryConsolidator:
         self._build_messages = build_messages
         self._get_tool_definitions = get_tool_definitions
         self._locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+        self.hooks: HookRegistry | None = None
 
     def get_lock(self, session_key: str) -> asyncio.Lock:
         """Return the shared consolidation lock for one session."""
@@ -329,38 +331,61 @@ class MemoryConsolidator:
                 )
                 return
 
-            for round_num in range(self._MAX_CONSOLIDATION_ROUNDS):
-                if estimated <= target:
-                    return
-
-                boundary = self.pick_consolidation_boundary(session, max(1, estimated - target))
-                if boundary is None:
-                    logger.debug(
-                        "Token consolidation: no safe boundary for {} (round {})",
-                        session.key,
-                        round_num,
-                    )
-                    return
-
-                end_idx = boundary[0]
-                chunk = session.messages[session.last_consolidated:end_idx]
-                if not chunk:
-                    return
-
-                logger.info(
-                    "Token consolidation round {} for {}: {}/{} via {}, chunk={} msgs",
-                    round_num,
-                    session.key,
-                    estimated,
-                    self.context_window_tokens,
-                    source,
-                    len(chunk),
+            # Hook: before consolidation
+            if self.hooks:
+                await self.hooks.call(
+                    HookEvent.BEFORE_CONSOLIDATION,
+                    HookContext(
+                        event=HookEvent.BEFORE_CONSOLIDATION,
+                        session_key=session.key,
+                        data={"message_count": len(session.messages)},
+                    ),
                 )
-                if not await self.consolidate_messages(chunk):
-                    return
-                session.last_consolidated = end_idx
-                self.sessions.save(session)
 
-                estimated, source = self.estimate_session_prompt_tokens(session)
-                if estimated <= 0:
-                    return
+            try:
+                for round_num in range(self._MAX_CONSOLIDATION_ROUNDS):
+                    if estimated <= target:
+                        return
+
+                    boundary = self.pick_consolidation_boundary(session, max(1, estimated - target))
+                    if boundary is None:
+                        logger.debug(
+                            "Token consolidation: no safe boundary for {} (round {})",
+                            session.key,
+                            round_num,
+                        )
+                        return
+
+                    end_idx = boundary[0]
+                    chunk = session.messages[session.last_consolidated:end_idx]
+                    if not chunk:
+                        return
+
+                    logger.info(
+                        "Token consolidation round {} for {}: {}/{} via {}, chunk={} msgs",
+                        round_num,
+                        session.key,
+                        estimated,
+                        self.context_window_tokens,
+                        source,
+                        len(chunk),
+                    )
+                    if not await self.consolidate_messages(chunk):
+                        return
+                    session.last_consolidated = end_idx
+                    self.sessions.save(session)
+
+                    estimated, source = self.estimate_session_prompt_tokens(session)
+                    if estimated <= 0:
+                        return
+            finally:
+                # Hook: after consolidation
+                if self.hooks:
+                    await self.hooks.call(
+                        HookEvent.AFTER_CONSOLIDATION,
+                        HookContext(
+                            event=HookEvent.AFTER_CONSOLIDATION,
+                            session_key=session.key,
+                            data={"consolidated": True},
+                        ),
+                    )

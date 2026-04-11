@@ -84,3 +84,7 @@ logs/
 tmp/
 temp/
 *.tmp
+
+# Project specific
+.skill_id
+.sisyphus
